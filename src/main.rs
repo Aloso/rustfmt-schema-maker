@@ -73,7 +73,7 @@ enum Value {
     String(String),
 }
 
-#[derive(Serialize, Debug, Copy, Clone)]
+#[derive(Serialize, Debug, Copy, Clone, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum Type {
     Integer,
@@ -124,7 +124,7 @@ fn to_item(input: &str, regex: &Regex) -> Result<(String, Item)> {
         None => Type::String,
     };
 
-    let r#enum = captures
+    let mut r#enum = captures
         .get(3)
         .map(|s| {
             s.as_str()
@@ -133,6 +133,10 @@ fn to_item(input: &str, regex: &Regex) -> Result<(String, Item)> {
                 .collect::<Result<Vec<_>>>()
         })
         .transpose()?;
+
+    if r#enum.is_none() && r#type == Type::Boolean {
+        r#enum = Some(vec![Value::Boolean(true), Value::Boolean(false)]);
+    }
 
     let default = captures
         .get(7)
