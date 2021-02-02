@@ -4,10 +4,11 @@ Generates a JSON schema for `rustfmt.toml` files. This can be used with [taplo](
 
 ### Installation
 
-You need Cargo and rustfmt installed. Installation of Cargo is explained [here](https://www.rust-lang.org/tools/install). You can install rustfmt with
+You need cargo, rustfmt and nightly Rust installed. Installation of cargo is explained [here](https://www.rust-lang.org/tools/install). You can install rustfmt and nightly Rust with
 
 ```fish
 rustup component add rustfmt
+rustup toolchain install nightly
 ```
 
 Then you can install rustfmt-schema-maker with
