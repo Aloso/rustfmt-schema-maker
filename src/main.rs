@@ -1,41 +1,36 @@
-use std::{collections::HashMap, io::Write, process::exit, str::FromStr};
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::process::exit;
 
 use anyhow::{anyhow, bail, Context, Result};
 use regex::Regex;
-use serde::Serialize;
+
+use item::{Item, Value};
+use typ::Type;
+
+mod item;
+mod typ;
 
 fn main() -> Result<()> {
-    let output = std::process::Command::new("cargo")
-        .args(&[
-            "+nightly",
-            "fmt",
-            "--",
-            "--unstable-features",
-            "--help=config",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .output()?;
-    if !output.status.success() {
-        eprintln!("rustfmt exited with status code {}:", output.status);
-        eprintln!("  {}", String::from_utf8_lossy(&output.stderr));
-        exit(1);
+    let regex = get_regex();
+
+    let output_nightly = run_rustfmt(&[
+        "+nightly",
+        "fmt",
+        "--",
+        "--unstable-features",
+        "--help=config",
+    ])?;
+    let output_stable = run_rustfmt(&["fmt", "--", "--help=config"])?;
+    let mut items_nightly = parse_rustfmt_output(&output_nightly, &regex)?;
+    let items_stable = parse_rustfmt_output(&output_stable, &regex)?;
+
+    for (k, item) in items_nightly.iter_mut() {
+        if !items_stable.contains_key(k) {
+            let desc = item.description.as_mut().unwrap();
+            desc.push_str("\n\n### Unstable\nThis option requires Nightly Rust.");
+        }
     }
-
-    let output = String::from_utf8(output.stdout)?;
-
-    let regex = Regex::new(
-        r#"^([\d\w_]+)\s+(\[(.*?)\])?(<(.*?)>)?(\s*Default:\s*(.*?))?( \(unstable\))?$"#,
-    )
-    .unwrap();
-
-    let items = output
-        .trim()
-        .trim_start_matches("Configuration Options:")
-        .trim_start()
-        .replace('\r', "")
-        .split("\n\n")
-        .map(|s| to_item(s, &regex))
-        .collect::<Result<HashMap<String, Item>>>()?;
 
     let mut stdout = std::io::stdout();
     serde_json::to_writer_pretty(
@@ -45,7 +40,7 @@ fn main() -> Result<()> {
             title: Some("rustfmt schema".into()),
             r#type: Some(Type::Object),
             description: Some("https://rust-lang.github.io/rustfmt".into()),
-            properties: Some(items),
+            properties: Some(items_nightly),
             ..Item::default()
         },
     )?;
@@ -54,77 +49,36 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-#[derive(Default, Serialize)]
-struct Item {
-    #[serde(rename = "$schema")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    schema: Option<&'static str>,
+fn run_rustfmt(args: &[&str]) -> Result<String> {
+    let output = std::process::Command::new("cargo")
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .output()?;
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    title: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    r#type: Option<Type>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    default: Option<Value>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    r#enum: Option<Vec<Value>>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    properties: Option<HashMap<String, Item>>,
-}
-
-#[derive(Serialize, Debug)]
-#[serde(untagged)]
-enum Value {
-    Integer(i64),
-    Boolean(bool),
-    String(String),
-    Array(Vec<Value>),
-}
-
-#[derive(Serialize, Debug, Copy, Clone, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum Type {
-    Integer,
-    Boolean,
-    String,
-    Object,
-    Array,
-}
-
-impl Type {
-    fn parse(&self, s: &str) -> Result<Value> {
-        Ok(match self {
-            Type::Integer => Value::Integer(s.parse()?),
-            Type::Boolean => Value::Boolean(match s {
-                "true" => true,
-                "false" => false,
-                s => bail!("Unknown boolean literal {:?}", s),
-            }),
-            Type::String => Value::String(s.into()),
-            Type::Array if s == "[]" => Value::Array(vec![]),
-            t => bail!("Can't parse this type: {:?}", t),
-        })
+    if !output.status.success() {
+        eprintln!("rustfmt exited with status code {}:", output.status);
+        eprintln!("  {}", String::from_utf8_lossy(&output.stderr));
+        exit(1);
     }
+
+    let output = String::from_utf8(output.stdout)?;
+    Ok(output)
 }
 
-impl FromStr for Type {
-    type Err = anyhow::Error;
+fn parse_rustfmt_output(output: &str, regex: &Regex) -> Result<BTreeMap<String, Item>> {
+    output
+        .trim()
+        .trim_start_matches("Configuration Options:")
+        .trim_start()
+        .replace('\r', "")
+        .split("\n\n")
+        .map(|s| to_item(s, regex))
+        .collect()
+}
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s {
-            "integer" | "unsigned integer" => Type::Integer,
-            "boolean" => Type::Boolean,
-            "string" => Type::String,
-            _ => bail!("Unknown type {:?}", s),
-        })
-    }
+fn get_regex() -> Regex {
+    Regex::new(r#"^([\d\w_]+)\s+(\[(.*?)\])?(<(.*?)>)?(\s*Default:\s*(.*?))?( \(unstable\))?$"#)
+        .unwrap()
 }
 
 fn to_item(input: &str, regex: &Regex) -> Result<(String, Item)> {
@@ -145,7 +99,7 @@ fn to_item(input: &str, regex: &Regex) -> Result<(String, Item)> {
         .captures(fst)
         .with_context(|| anyhow!("String could not be parsed: {:?}", fst))?;
 
-    let key = captures[1].into();
+    let key: String = captures[1].into();
 
     let mut r#type = match captures.get(5).map(|m| m.as_str()) {
         Some(s) => s.parse::<Type>()?,
@@ -178,12 +132,10 @@ fn to_item(input: &str, regex: &Regex) -> Result<(String, Item)> {
         .map(|s| r#type.parse(s.as_str()))
         .transpose()?;
 
-    let unstable = captures.get(8).is_some();
-    let desc = if unstable {
-        String::from(desc) + "\n\n### Unstable\nThis option requires Nightly Rust."
-    } else {
-        String::from(desc)
-    };
+    let desc = String::from(desc)
+        + "\n\n[Documentation](https://rust-lang.github.io/rustfmt/#"
+        + &key
+        + ")";
 
     Ok((
         key,
